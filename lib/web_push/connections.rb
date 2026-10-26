@@ -26,6 +26,12 @@ class WebPush::Connections
       end
   end
 
+  # The Net::HTTP a pooled delivery is opened with: Stages is part of the class, so a connection carries its stage
+  # from the start instead of having the module mixed into each one as it's opened.
+  class HTTP < Net::HTTP
+    include Stages
+  end
+
   def initialize(keep_alive_timeout: 30, max_idle: 150)
     @keep_alive_timeout = keep_alive_timeout
     @max_idle = max_idle
@@ -35,8 +41,8 @@ class WebPush::Connections
   end
 
   def request(http, request)
-    unless http.ipaddr && !http.proxy? && http.use_ssl? && !http.started?
-      raise ArgumentError, "Only new, direct TLS connections pinned to an address are pooled"
+    unless http.is_a?(HTTP) && http.ipaddr && !http.proxy? && http.use_ssl? && !http.started?
+      raise ArgumentError, "Only new, direct TLS connections pinned to an address and opened as WebPush::Connections::HTTP are pooled"
     end
     address = [ http.address, http.port, http.ipaddr ]
 
@@ -48,7 +54,6 @@ class WebPush::Connections
       end
     end
 
-    http.extend Stages
     http.keep_alive_timeout = @keep_alive_timeout
     http.start
     send_over(http, request, reused: false).tap { checkin(address, http) }

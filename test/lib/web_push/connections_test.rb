@@ -76,11 +76,13 @@ class WebPush::ConnectionsTest < ActiveSupport::TestCase
     end
   end
 
-  test "a TLS failure on a new connection before the push is written is reported as it is" do
-    failing_check = Module.new { private def begin_transport(*) = raise(OpenSSL::SSL::SSLError, "alert right after the handshake") }
+  class FailingCheckHTTP < WebPush::Connections::HTTP
+    private def begin_transport(*) = raise(OpenSSL::SSL::SSLError, "alert right after the handshake")
+  end
 
+  test "a TLS failure on a new connection before the push is written is reported as it is" do
     with_push_service do |server|
-      assert_raises(OpenSSL::SSL::SSLError) { @connections.request(pinned_connection(server).extend(failing_check), push_request) }
+      assert_raises(OpenSSL::SSL::SSLError) { @connections.request(pinned_connection(server, http_class: FailingCheckHTTP), push_request) }
       assert_empty server.requests
     end
   end
@@ -97,14 +99,15 @@ class WebPush::ConnectionsTest < ActiveSupport::TestCase
     end
   end
 
-  test "only new, direct TLS connections pinned to an address are pooled" do
+  test "only new, direct TLS connections pinned to an address and opened as WebPush::Connections::HTTP are pooled" do
     with_push_service do |server|
-      unpinned = Net::HTTP.new(HOST, server.port, nil).tap { it.use_ssl = true }
-      proxied = Net::HTTP.new(HOST, server.port, "127.0.0.1", 3128).tap { it.ipaddr = IP; it.use_ssl = true }
+      unpinned = WebPush::Connections::HTTP.new(HOST, server.port, nil).tap { it.use_ssl = true }
+      proxied = WebPush::Connections::HTTP.new(HOST, server.port, "127.0.0.1", 3128).tap { it.ipaddr = IP; it.use_ssl = true }
       plain = pinned_connection(server).tap { it.use_ssl = false }
       started = pinned_connection(server).tap(&:start)
+      untracked = Net::HTTP.new(HOST, server.port, nil).tap { it.ipaddr = IP; it.use_ssl = true }
 
-      [ unpinned, proxied, plain, started ].each do |http|
+      [ unpinned, proxied, plain, started, untracked ].each do |http|
         assert_raises(ArgumentError) { @connections.request(http, push_request) }
       end
       assert_empty server.requests

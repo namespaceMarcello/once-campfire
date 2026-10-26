@@ -1,8 +1,11 @@
 module MessagesHelper
-  # auto_link re-sanitizes with Rails' default safe list, which lacks the
-  # formatting the rich text editor produces
+  # Rendered text is re-sanitized before linking. Rails' default safe list
+  # lacks the formatting the rich text editor produces
   AUTO_LINK_ALLOWED_TAGS = Rails::HTML5::SafeListSanitizer.allowed_tags + ContentFilters::EDITOR_FORMATTING_TAGS
   AUTO_LINK_ALLOWED_ATTRIBUTES = Rails::HTML5::SafeListSanitizer.allowed_attributes + ContentFilters::EDITOR_FORMATTING_ATTRIBUTES
+
+  # Text auto_link could turn into a link: a URL has a scheme or www., an email address an @
+  LINKABLE_TEXT = /:|@|www\./i
 
   def message_area_tag(room, &)
     tag.div id: "message-area", class: "message-area", contents: true, data: {
@@ -104,7 +107,7 @@ module MessagesHelper
     dependencies = [ message.attributes, message.room.attributes.slice("id", "type", "name"),
       message.creator.attributes.slice("id", "name", "bio", "updated_at"), message.body.body&.to_html,
       message.boosts.sort_by(&:created_at).map { |boost| [ boost.attributes, boost.booster.attributes.slice("id", "name", "bio", "updated_at") ] } ]
-    [ "message-presentation-v8", Digest::SHA256.hexdigest(ActiveSupport::JSON.encode(dependencies)) ]
+    [ "message-presentation-v9", Digest::SHA256.hexdigest(ActiveSupport::JSON.encode(dependencies)) ]
   end
 
   private
@@ -113,10 +116,7 @@ module MessagesHelper
     end
 
     def text_message_presentation(body, fragment_cached: false)
-      render = -> do
-        auto_link h(ContentFilters::TextMessagePresentationFilters.apply(body)),
-          html: { target: "_blank" }, sanitize_options: { tags: AUTO_LINK_ALLOWED_TAGS, attributes: AUTO_LINK_ALLOWED_ATTRIBUTES }
-      end
+      render = -> { auto_link_text h(ContentFilters::TextMessagePresentationFilters.apply(body)) }
 
       # Collection-cached messages already store this inside their fragment, so
       # only messages rendered fresh, such as in direct rooms, cache it separately.
@@ -125,11 +125,29 @@ module MessagesHelper
       # Embedded attachments render database-backed metadata and signed URLs.
       # Plain text HTML depends only on its content, even after a foreign edit.
       html = body.to_html
-      if !html.include?("<action-text-attachment") && html.bytesize <= 1.megabyte
-        Rails.cache.fetch([ "text-presentation-v2", Rails.configuration.x.presentation_cache_version, I18n.locale, Digest::SHA256.hexdigest(html) ]) { render.call }
+      if !html.include?("<action-text-attachment") && html.bytesize <= ResponseCache::MAX_ENTRY_BYTES
+        Rails.cache.fetch([ "text-presentation-v3", Rails.configuration.x.presentation_cache_version, I18n.locale, Digest::SHA256.hexdigest(html) ]) { render.call }
       else
         render.call
       end
+    end
+
+    # auto_link finds URLs and email addresses with regular expressions, which
+    # can't tell an attribute value from text. Hand it one text node at a time,
+    # escaped as the serializer writes text, so a link can only land between tags.
+    def auto_link_text(html)
+      fragment = Nokogiri::HTML5.fragment(sanitize(html, tags: AUTO_LINK_ALLOWED_TAGS, attributes: AUTO_LINK_ALLOWED_ATTRIBUTES))
+
+      fragment.xpath(".//text()[not(ancestor::a)]").each do |node|
+        if node.text.match?(LINKABLE_TEXT)
+          text = node.to_html
+          linked = auto_link(text, html: { target: "_blank" })
+          node.replace Nokogiri::HTML5.fragment(linked) unless linked == text
+        end
+      end
+
+      # A <pre> starting with a newline needs an extra one written out to survive the next parse
+      fragment.to_html(preserve_newline: true).html_safe
     end
 
     def messages_actions
